@@ -19,7 +19,7 @@
     <header>
       <div class="brand">
         <span class="neon-text-cyan">CROWD</span><span class="neon-text-pink">PLAY</span>
-        <span class="badge">ADMIN v1.0</span>
+        <span class="badge">ADMIN v1.1</span>
       </div>
       <div class="system-status">
         <span class="dot green"></span> Connected to Server
@@ -47,6 +47,7 @@
     <!-- 2. CONTROL PANEL SECTION -->
     <div id="controlSection" class="panel hidden">
       <div class="grid-2col">
+
         <!-- Setup Area -->
         <div class="panel-card">
           <h3>1. Activity Setup</h3>
@@ -55,7 +56,7 @@
               <label for="roomCodeInput">Room Code (Leave blank for random)</label>
               <input type="text" id="roomCodeInput" maxlength="4" placeholder="e.g. PLAY" style="text-transform: uppercase;">
             </div>
-            
+
             <div class="form-group">
               <label>Module Selection</label>
               <div class="select-wrapper">
@@ -77,6 +78,24 @@
                 <input type="number" id="gridCols" min="2" max="12" value="6">
               </div>
             </div>
+
+            <!-- ── Time Limit (new) ───────────────────────────────────────── -->
+            <div class="form-group">
+              <label for="timeLimitMinutes">
+                ⏱ Time Limit (minutes)
+                <span style="font-size:0.78rem;color:#888;font-weight:400;margin-left:6px;">Leave 0 for no limit</span>
+              </label>
+              <input
+                type="number"
+                id="timeLimitMinutes"
+                min="0"
+                max="60"
+                step="0.5"
+                value="0"
+                placeholder="0 = No limit"
+              >
+            </div>
+            <!-- ─────────────────────────────────────────────────────────── -->
 
             <div class="form-group">
               <label for="puzzleImageFile">Puzzle Board Image</label>
@@ -105,7 +124,7 @@
           <div class="console-placeholder" id="consolePlaceholder">
             Initialize an activity room in the setup panel to begin event broadcast.
           </div>
-          
+
           <div class="console-active hidden" id="consoleActive">
             <div class="console-header-info">
               <div>
@@ -119,9 +138,7 @@
             </div>
 
             <div class="qr-container-card">
-              <div id="qrCodeWrapper">
-                <!-- QR Code generated here -->
-              </div>
+              <div id="qrCodeWrapper"></div>
               <div class="join-info">
                 <p>Attendees scan QR to join, or visit:</p>
                 <code id="activeJoinUrl">https://localhost:3000/join/----</code>
@@ -144,7 +161,7 @@
               <button class="btn btn-primary" id="startActivityBtn">🚀 Start Activity</button>
               <button class="btn btn-danger" id="resetRoomBtn">🔄 Reset Session</button>
             </div>
-            
+
             <div class="live-activity-log">
               <h4>Console Monitor</h4>
               <div class="log-output" id="consoleLog">
@@ -153,6 +170,7 @@
             </div>
           </div>
         </div>
+
       </div>
     </div>
   </div>

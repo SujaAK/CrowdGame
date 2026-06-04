@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let authToken = null;
   let activeRoomCode = null;
   let uploadedImageUrl = null;
+  let roomAdminToken = null; // per-room admin token received on host-room
 
   // DOM Elements
   const loginSection = document.getElementById('loginSection');
@@ -15,6 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const roomCodeInput = document.getElementById('roomCodeInput');
   const gridRows = document.getElementById('gridRows');
   const gridCols = document.getElementById('gridCols');
+  const timeLimitInput = document.getElementById('timeLimitMinutes');
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('puzzleImageFile');
   const uploadStatus = document.getElementById('uploadStatus');
@@ -36,27 +38,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetRoomBtn = document.getElementById('resetRoomBtn');
   const consoleLog = document.getElementById('consoleLog');
 
-  // Helper to log console messages
+  // ── Console Logger ──────────────────────────────────────────────────────────
   function consoleLogMsg(msg) {
     const time = new Date().toLocaleTimeString();
     consoleLog.innerHTML += `\n[${time}] ${msg}`;
     consoleLog.scrollTop = consoleLog.scrollHeight;
   }
 
-  // 1. ADMIN AUTHENTICATION
+  // ── 1. Admin Authentication ─────────────────────────────────────────────────
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     loginError.classList.add('hidden');
-    
+
     try {
       const response = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: adminPassword.value })
       });
-      
+
       const data = await response.json();
-      
+
       if (response.ok && data.success) {
         authToken = data.token;
         loginSection.classList.add('hidden');
@@ -73,35 +75,56 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 2. SOCKET INITIALIZATION
+  // ── 2. Socket Initialization ────────────────────────────────────────────────
   function initializeSocket() {
-    // Supply the JWT in the handshake auth so the server middleware can mark
-    // this socket as isAdmin = true before any events are processed.
     socket = io({ auth: { token: authToken } });
-    
+
     socket.on('connect', () => {
       console.log('Admin socket connected.');
     });
 
+    // Store the room-scoped admin token issued by the server on host-room
+    socket.on('room-created', (data) => {
+      if (data.roomAdminToken) {
+        roomAdminToken = data.roomAdminToken;
+        console.log('[Admin] Room admin token received.');
+      }
+    });
+
     socket.on('player-joined', (data) => {
-      consoleLogMsg(`Player '${data.displayName}' connected.`);
+      consoleLogMsg(`👤 Player '${data.displayName}' connected.`);
       attendeesCount.textContent = data.count;
     });
 
     socket.on('player-left', (data) => {
-      consoleLogMsg(`Player '${data.displayName}' disconnected.`);
+      consoleLogMsg(`👤 Player '${data.displayName}' disconnected.`);
       attendeesCount.textContent = data.count;
     });
 
     socket.on('piece-placed', (data) => {
-      if (data.correct) {
-        consoleLogMsg(`Piece solved by ${data.placedBy}! Progress: ${data.progress}%`);
-        puzzleProgress.textContent = `${data.progress}%`;
+      puzzleProgress.textContent = `${data.progress}%`;
+      consoleLogMsg(`🧩 Piece placed by ${data.placedBy}! Progress: ${data.progress}%`);
+    });
+
+    // Timer tick — update admin console with remaining time
+    socket.on('timer-tick', (data) => {
+      const mins = Math.floor(data.timeRemaining / 60).toString().padStart(2, '0');
+      const secs = (data.timeRemaining % 60).toString().padStart(2, '0');
+      const timerDisp = document.getElementById('adminTimerDisplay');
+      if (timerDisp) {
+        timerDisp.textContent = `⏱ ${mins}:${secs}`;
+        timerDisp.style.color = data.timeRemaining <= 60 ? '#ff4500' : '#00f3ff';
       }
     });
 
+    socket.on('time-up', (data) => {
+      consoleLogMsg(`⏰ TIME'S UP! Pieces placed: ${data.piecesPlaced}/${data.totalPieces}`);
+      activeRoomStatusDisp.textContent = 'TIME UP';
+      activeRoomStatusDisp.className = 'value status-badge completed';
+    });
+
     socket.on('activity-complete', (data) => {
-      consoleLogMsg(`🏆 PUZZLE SOLVED COMPLETED!`);
+      consoleLogMsg(`🏆 PUZZLE COMPLETE! All pieces placed.`);
       activeRoomStatusDisp.textContent = 'COMPLETED';
       activeRoomStatusDisp.className = 'value status-badge completed';
     });
@@ -112,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 3. FILE UPLOAD HANDLING (DRAG & DROP)
+  // ── 3. File Upload Handling ─────────────────────────────────────────────────
   dropzone.addEventListener('click', () => fileInput.click());
 
   dropzone.addEventListener('dragover', (e) => {
@@ -130,17 +153,11 @@ document.addEventListener('DOMContentLoaded', () => {
     e.preventDefault();
     dropzone.style.borderColor = 'rgba(0, 243, 255, 0.3)';
     dropzone.style.background = 'rgba(0, 243, 255, 0.02)';
-    
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      handleFileUpload(files[0]);
-    }
+    if (e.dataTransfer.files.length > 0) handleFileUpload(e.dataTransfer.files[0]);
   });
 
   fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) {
-      handleFileUpload(e.target.files[0]);
-    }
+    if (e.target.files.length > 0) handleFileUpload(e.target.files[0]);
   });
 
   async function handleFileUpload(file) {
@@ -148,24 +165,22 @@ document.addEventListener('DOMContentLoaded', () => {
       alert('File must be an image type (PNG, JPEG, GIF).');
       return;
     }
-    
+
     uploadStatus.classList.remove('hidden');
     dropzone.classList.add('hidden');
-    
+
     const formData = new FormData();
     formData.append('image', file);
-    
+
     try {
       const response = await fetch('/api/admin/upload-puzzle-image', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${authToken}`
-        },
+        headers: { 'Authorization': `Bearer ${authToken}` },
         body: formData
       });
-      
+
       const data = await response.json();
-      
+
       if (response.ok && data.success) {
         uploadedImageUrl = data.imageUrl;
         imagePreview.src = uploadedImageUrl;
@@ -190,16 +205,15 @@ document.addEventListener('DOMContentLoaded', () => {
     dropzone.classList.remove('hidden');
   });
 
-  // 4. ROOM CREATION & MANAGEMENT
+  // ── 4. Room Creation ────────────────────────────────────────────────────────
   setupForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     createRoomBtn.disabled = true;
     createRoomBtn.textContent = 'Initializing...';
 
     const customCode = roomCodeInput.value.trim().toUpperCase();
-    
+
     try {
-      // Create room code parameters via room api
       const urlParams = customCode ? `?roomCode=${customCode}` : '';
       const response = await fetch(`/api/room/config${urlParams}`);
       const roomConfig = await response.json();
@@ -207,25 +221,18 @@ document.addEventListener('DOMContentLoaded', () => {
       activeRoomCode = roomConfig.roomCode;
       activeRoomCodeDisp.textContent = activeRoomCode;
 
-      // Pre-create the room in the server's RoomManager so that Start Activity
-      // works immediately without waiting for the screen display to connect.
-      // When screen.html connects later it will take over as the display host.
       socket.emit('host-room', activeRoomCode);
 
-      // Update QR Code image
       qrCodeWrapper.innerHTML = `<img src="${roomConfig.qrDataUrl}" alt="Join QR Code" />`;
       activeJoinUrl.textContent = roomConfig.joinUrl;
 
-      // Unhide panels
       consolePlaceholder.classList.add('hidden');
       consoleActive.classList.remove('hidden');
-      
+
       consoleLogMsg(`Event initialized. Waiting for screen display / screen/${activeRoomCode} connection...`);
-      
-      // Prompt user to open the Big Screen display
       const hostLink = `${window.location.protocol}//${window.location.host}/screen/${activeRoomCode}`;
       consoleLogMsg(`👉 PLEASE OPEN SCREEN DISPLAY AT: ${hostLink}`);
-      
+
       createRoomBtn.textContent = 'Room Active';
     } catch (err) {
       console.error('Room creation failed:', err);
@@ -235,39 +242,58 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Start the puzzle activity!
+  // ── 5. Start Activity ───────────────────────────────────────────────────────
   startActivityBtn.addEventListener('click', () => {
     if (!activeRoomCode || !socket) return;
-    
+
     const rows = parseInt(gridRows.value) || 4;
     const cols = parseInt(gridCols.value) || 6;
-    
+
+    // Parse time limit — convert minutes to seconds (0 = no limit)
+    const timeLimitMinutes = timeLimitInput ? parseFloat(timeLimitInput.value) : 0;
+    const timeLimitSeconds = timeLimitMinutes > 0 ? Math.round(timeLimitMinutes * 60) : null;
+
     socket.emit('admin-start-activity', {
       roomCode: activeRoomCode,
       rows,
       cols,
-      imageUrl: uploadedImageUrl // Null means it uses the default server-generated synthwave image
+      imageUrl: uploadedImageUrl,
+      roomAdminToken,   // send the room-scoped token for authorization
+      timeLimitSeconds, // null = no timer, number = countdown seconds
     });
 
-    consoleLogMsg(`Activity jigsaw triggered (grid: ${rows}x${cols}). Slicing image...`);
+    const timerMsg = timeLimitSeconds
+      ? ` | ⏱ Timer: ${timeLimitMinutes} min`
+      : ' | ⏱ No time limit';
+
+    consoleLogMsg(`🚀 Activity started (grid: ${rows}x${cols}${timerMsg}). Slicing image...`);
     activeRoomStatusDisp.textContent = 'ACTIVE';
     activeRoomStatusDisp.className = 'value status-badge active';
     startActivityBtn.disabled = true;
+
+    // Show timer display in console area if timer is set
+    if (timeLimitSeconds) {
+      const timerEl = document.createElement('div');
+      timerEl.id = 'adminTimerDisplay';
+      timerEl.style.cssText = 'font-size:1.4rem;font-weight:bold;color:#00f3ff;margin:8px 0;letter-spacing:2px;';
+      timerEl.textContent = `⏱ ${String(Math.floor(timeLimitSeconds / 60)).padStart(2, '0')}:${String(timeLimitSeconds % 60).padStart(2, '0')}`;
+      consoleLog.parentElement.insertBefore(timerEl, consoleLog);
+    }
   });
 
-  // Reset the room session
+  // ── 6. Reset Session ────────────────────────────────────────────────────────
   resetRoomBtn.addEventListener('click', () => {
     if (!confirm('Are you sure you want to terminate the current room session? This will disconnect all players.')) return;
     window.location.reload();
   });
 
-  // Copy join link to clipboard
+  // ── 7. Copy Join URL ────────────────────────────────────────────────────────
   copyUrlBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(activeJoinUrl.textContent)
       .then(() => {
-        const prevText = copyUrlBtn.textContent;
+        const prev = copyUrlBtn.textContent;
         copyUrlBtn.textContent = 'Copied!';
-        setTimeout(() => copyUrlBtn.textContent = prevText, 2000);
+        setTimeout(() => copyUrlBtn.textContent = prev, 2000);
       })
       .catch(err => console.error('Copy failed:', err));
   });

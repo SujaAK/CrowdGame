@@ -2,40 +2,79 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const RoomManager = require('./roomManager');
 
+// ─── Payload Validators ───────────────────────────────────────────────────────
+const validate = {
+  roomCode: (v) => typeof v === 'string' && /^[A-Z0-9]{2,8}$/.test(v.toUpperCase()),
+  displayName: (v) => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 32,
+  pieceId: (v) => typeof v === 'string' && v.trim().length > 0,
+  coordinate: (v) => typeof v === 'number' && isFinite(v),
+  rows: (v) => Number.isInteger(Number(v)) && Number(v) >= 2 && Number(v) <= 10,
+  cols: (v) => Number.isInteger(Number(v)) && Number(v) >= 2 && Number(v) <= 10,
+};
+
+function validatePayload(socket, eventName, payload, rules) {
+  for (const [field, rule] of Object.entries(rules)) {
+    if (!rule(payload[field])) {
+      console.warn(`[Validation] Invalid field "${field}" in event "${eventName}" from socket ${socket.id}`);
+      socket.emit('error-message', `Invalid payload: "${field}" is missing or malformed.`);
+      return false;
+    }
+  }
+  return true;
+}
+
+// ─── Room Admin Token ─────────────────────────────────────────────────────────
+// When a host opens a room, they receive a room-scoped JWT.
+// Starting an activity requires this token OR a global admin JWT.
+function issueRoomAdminToken(roomCode) {
+  return jwt.sign(
+    { role: 'room-admin', roomCode },
+    config.JWT_SECRET,
+    { expiresIn: '12h' }
+  );
+}
+
+function verifyRoomAdminToken(token, roomCode) {
+  try {
+    const payload = jwt.verify(token, config.JWT_SECRET);
+    return payload.role === 'room-admin' && payload.roomCode === roomCode;
+  } catch (_) {
+    return false;
+  }
+}
+
 function initSockets(io) {
   const roomManager = new RoomManager(io);
 
-  // ─── Admin Auth Middleware ─────────────────────────────────────────────────
-  // Sockets that supply a valid admin JWT in socket.handshake.auth.token get
-  // socket.isAdmin = true.  All other sockets are treated as regular clients.
+  // ─── Global Admin Auth Middleware ─────────────────────────────────────────
   io.use((socket, next) => {
     const token = socket.handshake.auth && socket.handshake.auth.token;
     if (token) {
       try {
         const payload = jwt.verify(token, config.JWT_SECRET);
-        if (payload.role === 'admin') {
-          socket.isAdmin = true;
-        }
+        if (payload.role === 'admin') socket.isAdmin = true;
       } catch (_) {
-        // Token present but invalid — continue as regular client (don't reject,
-        // because mobile players connect without any token at all)
+        // Invalid token — continue as regular client
       }
     }
     next();
   });
 
   io.on('connection', (socket) => {
-    // console.log(`Socket connection: ${socket.id}`);
 
-    // 1. Host Room creation (Desktop Big Screen or Admin pre-init)
+    // ── 1. Host Room ──────────────────────────────────────────────────────────
     socket.on('host-room', async (roomCode) => {
+      // roomCode can be empty string (auto-generate) or a valid code
+      if (roomCode && !validate.roomCode(roomCode)) {
+        socket.emit('error-message', 'Invalid room code format.');
+        return;
+      }
+
       console.log(`Host connection request. Custom room code: ${roomCode}`);
       try {
-        // If the room already exists (admin pre-created it via the admin panel),
-        // don't wipe it — just transfer the display host to this socket.
         const existingRoom = roomManager.getRoom(roomCode);
-
         let room;
+
         if (existingRoom) {
           existingRoom.hostSocketId = socket.id;
           room = existingRoom;
@@ -48,13 +87,15 @@ function initSockets(io) {
         socket.roomCode = room.roomCode;
         socket.role = 'host';
 
+        // Issue a room-scoped admin token for this host
+        const roomAdminToken = issueRoomAdminToken(room.roomCode);
+
         socket.emit('room-created', {
           roomCode: room.roomCode,
-          status: room.status
+          status: room.status,
+          roomAdminToken  // host stores this, sends it back with admin-start-activity
         });
 
-        // If the activity was already started (admin started before screen opened),
-        // push the current full puzzle state to the screen immediately.
         if (room.activity) {
           socket.emit('activity-start', {
             type: 'jigsaw',
@@ -67,9 +108,20 @@ function initSockets(io) {
       }
     });
 
-    // 2. Mobile Player joins room
-    socket.on('join-room', ({ roomCode, displayName }) => {
-      roomCode = roomCode.toUpperCase();
+    // ── 2. Player joins room ──────────────────────────────────────────────────
+    socket.on('join-room', (data) => {
+      if (!data || typeof data !== 'object') {
+        socket.emit('error-message', 'Invalid join payload.');
+        return;
+      }
+
+      if (!validatePayload(socket, 'join-room', data, {
+        roomCode: validate.roomCode,
+        displayName: validate.displayName,
+      })) return;
+
+      const roomCode = data.roomCode.toUpperCase();
+      const displayName = data.displayName.trim();
       console.log(`Player '${displayName}' requesting join for Room: ${roomCode}`);
 
       const result = roomManager.joinRoom(roomCode, socket.id, displayName);
@@ -89,14 +141,12 @@ function initSockets(io) {
         displayName: result.participant.displayName
       });
 
-      // Broadcast updated participant list to everyone in the room
       const room = roomManager.getRoom(roomCode);
       io.to(roomCode).emit('room-update', {
         status: room.status,
         participantsCount: roomManager.getConnectedCount(roomCode)
       });
 
-      // If activity is already running, send the starting state immediately to the new player
       if (room.activity) {
         socket.emit('activity-start', {
           type: 'jigsaw',
@@ -105,25 +155,33 @@ function initSockets(io) {
       }
     });
 
-    // 3. Admin / Host starts activity
-    // ── Auth guard ────────────────────────────────────────────────────────────
-    // The requesting socket must either:
-    //   a) carry a valid admin JWT (socket.isAdmin), OR
-    //   b) be the registered host socket for that room.
-    // This prevents any arbitrary player from starting or restarting the game.
-    socket.on('admin-start-activity', async ({ roomCode, rows, cols, imageUrl }) => {
-      console.log(`Admin requested activity start in room: ${roomCode}`);
+    // ── 3. Start activity ─────────────────────────────────────────────────────
+    socket.on('admin-start-activity', async (data) => {
+      if (!data || typeof data !== 'object') {
+        socket.emit('error-message', 'Invalid payload.');
+        return;
+      }
 
-      const room = roomManager.getRoom(roomCode);
+      const { roomCode, rows, cols, imageUrl, roomAdminToken, timeLimitSeconds } = data;
+
+      if (!validatePayload(socket, 'admin-start-activity', data, {
+        roomCode: validate.roomCode,
+        rows: validate.rows,
+        cols: validate.cols,
+      })) return;
+
+      const room = roomManager.getRoom(roomCode.toUpperCase());
       if (!room) {
         socket.emit('error-message', 'Room not found.');
         return;
       }
 
-      // ── Authorization check ──
+      // ── Authorization: global admin JWT OR valid room-scoped token ──
       const isRoomHost = socket.id === room.hostSocketId;
-      if (!socket.isAdmin && !isRoomHost) {
-        console.warn(`Unauthorized admin-start-activity attempt from socket ${socket.id}`);
+      const hasRoomToken = roomAdminToken && verifyRoomAdminToken(roomAdminToken, roomCode.toUpperCase());
+
+      if (!socket.isAdmin && !isRoomHost && !hasRoomToken) {
+        console.warn(`Unauthorized admin-start-activity from socket ${socket.id}`);
         socket.emit('error-message', 'Unauthorized: only the room host or admin can start an activity.');
         return;
       }
@@ -131,22 +189,21 @@ function initSockets(io) {
       const activityConfig = {
         rows: parseInt(rows) || 4,
         cols: parseInt(cols) || 6,
-        imageUrl: imageUrl
+        imageUrl,
+        timeLimitSeconds: timeLimitSeconds || null,
       };
 
-      const result = await roomManager.startActivity(roomCode, 'jigsaw', activityConfig);
+      const result = await roomManager.startActivity(roomCode.toUpperCase(), 'jigsaw', activityConfig);
       if (!result.success) {
         socket.emit('error-message', result.error);
         return;
       }
 
-      // Notify host and all players that the activity has started
       io.to(room.hostSocketId).emit('activity-start', {
         type: 'jigsaw',
         state: room.activity.getStateForScreen()
       });
 
-      // Send personalized starting configurations to each player
       room.participants.forEach((p) => {
         if (p.isConnected && p.socketId) {
           io.to(p.socketId).emit('activity-start', {
@@ -157,16 +214,24 @@ function initSockets(io) {
       });
     });
 
-    // 4. Jigsaw placement action from players
-    socket.on('move-piece', (actionData) => {
+    // ── 4. Move piece (live drag sync) ────────────────────────────────────────
+    socket.on('move-piece', (data) => {
       if (socket.role !== 'player' || !socket.roomCode) return;
+      if (!data || typeof data !== 'object') return;
+
+      if (!validatePayload(socket, 'move-piece', data, {
+        pieceId: validate.pieceId,
+        currentX: validate.coordinate,
+        currentY: validate.coordinate,
+      })) return;
+
       const room = roomManager.getRoom(socket.roomCode);
       if (!room || !room.activity || room.status !== 'active') return;
 
       const player = room.participants.get(socket.playerId);
       if (!player) return;
 
-      const { pieceId, currentX, currentY } = actionData;
+      const { pieceId, currentX, currentY } = data;
       const piece = room.activity.pieces.find(p => p.id === pieceId);
       if (piece && piece.assignedTo === player.id && !piece.isPlaced) {
         piece.currentX = currentX;
@@ -175,8 +240,16 @@ function initSockets(io) {
       }
     });
 
-    socket.on('place-piece', (actionData) => {
+    // ── 5. Place piece ────────────────────────────────────────────────────────
+    socket.on('place-piece', (data) => {
       if (socket.role !== 'player' || !socket.roomCode) return;
+      if (!data || typeof data !== 'object') return;
+
+      if (!validatePayload(socket, 'place-piece', data, {
+        pieceId: validate.pieceId,
+        currentX: validate.coordinate,
+        currentY: validate.coordinate,
+      })) return;
 
       const room = roomManager.getRoom(socket.roomCode);
       if (!room || !room.activity || room.status !== 'active') return;
@@ -184,14 +257,18 @@ function initSockets(io) {
       const player = room.participants.get(socket.playerId);
       if (!player) return;
 
-      const result = room.activity.onPlayerAction(player, 'place-piece', actionData);
+      const result = room.activity.onPlayerAction(player, 'place-piece', data);
       if (!result || !result.success) {
         socket.emit('error-message', result ? result.error : 'Action failed');
         return;
       }
 
-      // If correct, broadcast placement update to all clients in the room
       if (result.correct) {
+        // Build leaderboard snapshot and emit with every correct placement
+        const leaderboard = Array.from(room.participants.values())
+          .map(p => ({ displayName: p.displayName, score: p.score, color: p.color }))
+          .sort((a, b) => b.score - a.score);
+
         io.to(socket.roomCode).emit('piece-placed', {
           pieceId: result.pieceId,
           correctX: result.correctX,
@@ -199,42 +276,33 @@ function initSockets(io) {
           placedBy: result.placedBy,
           score: result.score,
           progress: result.progress,
-          isSolved: result.isSolved
+          isSolved: result.isSolved,
+          leaderboard,  // live leaderboard update on every placement
         });
 
-        // Send a fresh set of assigned pieces specifically to the placing player
         socket.emit('assign-pieces', {
           assignedPieces: room.activity.getStateForPlayer(socket.playerId).assignedPieces
         });
 
-        // If solved, broadcast game completion
         if (result.isSolved) {
-          // Sort participants by score for the final leaderboard
-          const leaderboard = Array.from(room.participants.values())
-            .map(p => ({ displayName: p.displayName, score: p.score, color: p.color }))
-            .sort((a, b) => b.score - a.score);
-
           io.to(socket.roomCode).emit('activity-complete', {
             leaderboard,
             totalPieces: room.activity.totalPieces
           });
-
           room.status = 'completed';
+          roomManager.stopTimer(room.roomCode);
         }
       } else {
-        // Sync drag coordinates to the big screen for live visual feedback
         io.to(room.hostSocketId).emit('piece-move', {
           pieceId: result.pieceId,
           currentX: result.currentX,
           currentY: result.currentY
         });
-
-        // Notify the player of the incorrect placement
         socket.emit('placement-incorrect', { pieceId: result.pieceId });
       }
     });
 
-    // 5. Clean up on socket disconnect
+    // ── 6. Disconnect ─────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       roomManager.handleDisconnect(socket.id);
     });

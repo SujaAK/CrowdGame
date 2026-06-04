@@ -23,7 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const joinForm = document.getElementById('joinForm');
   const displayNameInput = document.getElementById('displayNameInput');
   const joinRoomCode = document.getElementById('joinRoomCode');
-  
+
   const welcomeText = document.getElementById('welcomeText');
   const playerColorVal = document.getElementById('playerColorVal');
 
@@ -33,7 +33,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const assignedPiecesPool = document.getElementById('assignedPiecesPool');
   const dragBoard = document.getElementById('dragBoard');
   const pieceSelectorContainer = document.getElementById('pieceSelectorContainer');
-
   const myContributionsVal = document.getElementById('myContributionsVal');
 
   // Extract roomCode from URL (/join/ABCD)
@@ -41,33 +40,166 @@ document.addEventListener('DOMContentLoaded', () => {
   roomCode = pathParts[pathParts.length - 1].toUpperCase();
   joinRoomCode.textContent = roomCode;
 
-  // 1. JOIN FORM FORM SUBMISSION
+  // ── Audio Synthesizer ───────────────────────────────────────────────────────
+  let audioCtx = null;
+
+  function initAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+  }
+
+  const Sound = {
+    // Correct placement — satisfying rising snap
+    playSnap() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+      osc.frequency.setValueAtTime(660, audioCtx.currentTime + 0.06);
+      osc.frequency.exponentialRampToValueAtTime(1100, audioCtx.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.22);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.22);
+    },
+
+    // Wrong placement — low thud
+    playWrong() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(80, audioCtx.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.2);
+    },
+
+    // Puzzle complete — ascending fanfare
+    playComplete() {
+      if (!audioCtx) return;
+      const notes = [261.63, 329.63, 392.00, 523.25];
+      notes.forEach((freq, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime + i * 0.13);
+        gain.gain.setValueAtTime(0, audioCtx.currentTime + i * 0.13);
+        gain.gain.linearRampToValueAtTime(0.15, audioCtx.currentTime + i * 0.13 + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.13 + 0.4);
+        osc.start(audioCtx.currentTime + i * 0.13);
+        osc.stop(audioCtx.currentTime + i * 0.13 + 0.4);
+      });
+    },
+
+    // Timer urgent — high beep for last 10s
+    playUrgentBeep() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(1100, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.1);
+    },
+
+    // Time's up — descending alarm
+    playTimeUp() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 1.0);
+      gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.0);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 1.0);
+    }
+  };
+
+  // ── Timer Display ───────────────────────────────────────────────────────────
+  function renderMobileTimer(seconds) {
+    let el = document.getElementById('mobileTimer');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'mobileTimer';
+      el.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-family: monospace;
+        font-size: 1.3rem;
+        font-weight: bold;
+        padding: 6px 0;
+        z-index: 999;
+        letter-spacing: 3px;
+        transition: background 0.3s, color 0.3s;
+      `;
+      document.body.insertBefore(el, document.body.firstChild);
+    }
+
+    const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const secs = (seconds % 60).toString().padStart(2, '0');
+    el.textContent = `⏱ ${mins}:${secs}`;
+
+    if (seconds <= 60) {
+      el.style.background = 'rgba(255,69,0,0.9)';
+      el.style.color = '#fff';
+    } else {
+      el.style.background = 'rgba(0,243,255,0.15)';
+      el.style.color = '#00f3ff';
+    }
+  }
+
+  function removeMobileTimer() {
+    const el = document.getElementById('mobileTimer');
+    if (el) el.remove();
+  }
+
+  // ── 1. Join Form ────────────────────────────────────────────────────────────
   joinForm.addEventListener('submit', (e) => {
     e.preventDefault();
     myDisplayName = displayNameInput.value.trim();
     if (!myDisplayName) return;
-
+    initAudio(); // unlock AudioContext on user gesture
     initializeSocketConnection();
   });
 
-  // 2. SOCKET AND PAIRING MANAGEMENT
+  // ── 2. Socket Connection ────────────────────────────────────────────────────
   function initializeSocketConnection() {
     socket = io();
 
     socket.on('connect', () => {
-      // Send join message
       socket.emit('join-room', { roomCode, displayName: myDisplayName });
     });
 
     socket.on('joined-successfully', (data) => {
       myPlayerId = data.playerId;
       myColor = data.color;
-      
-      // Update UI
+
       welcomeText.textContent = `WELCOME, ${myDisplayName.toUpperCase()}`;
       playerColorVal.textContent = getNeonColorName(myColor);
       playerColorVal.style.color = myColor;
-      
+
       joinSection.classList.add('hidden');
       waitingSection.classList.remove('hidden');
     });
@@ -83,24 +215,21 @@ document.addEventListener('DOMContentLoaded', () => {
       waitingSection.classList.add('hidden');
       completeSection.classList.add('hidden');
       gameplaySection.classList.remove('hidden');
-      
-      // Initialise header details
+
       headerPilotName.textContent = myDisplayName.toUpperCase();
       headerColorDot.style.backgroundColor = myColor;
       headerColorDot.style.boxShadow = `0 0 8px ${myColor}`;
-      
+
       gameProgressPct.textContent = `${data.state.progress}%`;
       currentAssignedPieces = data.state.assignedPieces || [];
       selectedPieceIndex = 0;
-      
-      // Set background image on dragBoard as a ghost reference
+
       if (data.state.imageUrl) {
-        dragBoard.style.backgroundImage = `linear-gradient(rgba(0, 0, 0, 0.65), rgba(0, 0, 0, 0.65)), url(${data.state.imageUrl})`;
+        dragBoard.style.backgroundImage = `linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0.65)), url(${data.state.imageUrl})`;
         dragBoard.style.backgroundSize = '100% 100%';
         dragBoard.style.backgroundPosition = 'center';
       }
 
-      // Configure grid overlay to match server rows/cols
       const gridOverlay = document.getElementById('gridOverlay');
       if (gridOverlay && data.state.rows && data.state.cols) {
         puzzleRows = data.state.rows;
@@ -108,8 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
         gridOverlay.style.gridTemplateColumns = `repeat(${puzzleCols}, 1fr)`;
         gridOverlay.style.gridTemplateRows = `repeat(${puzzleRows}, 1fr)`;
         gridOverlay.innerHTML = '';
-        const totalCells = puzzleRows * puzzleCols;
-        for (let i = 0; i < totalCells; i++) {
+        for (let i = 0; i < puzzleRows * puzzleCols; i++) {
           gridOverlay.appendChild(document.createElement('div'));
         }
       }
@@ -125,16 +253,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     socket.on('piece-placed', (data) => {
       gameProgressPct.textContent = `${data.progress}%`;
-      // Check if this was solved by me
       if (data.placedBy.toLowerCase() === myDisplayName.toLowerCase()) {
         piecesPlacedCount++;
         triggerHapticFeedback(true);
+        Sound.playSnap(); // ✅ correct placement sound
       }
     });
 
     socket.on('placement-incorrect', (data) => {
       triggerHapticFeedback(false);
-      // Find matching piece and run shake animation
+      Sound.playWrong(); // ❌ wrong placement sound
       const el = document.getElementById(data.pieceId);
       if (el) {
         el.classList.add('shake');
@@ -142,7 +270,38 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
+    // ── Timer events ──────────────────────────────────────────────────────────
+    socket.on('timer-tick', (data) => {
+      renderMobileTimer(data.timeRemaining);
+      if (data.timeRemaining <= 10) {
+        Sound.playUrgentBeep();
+      }
+    });
+
+    socket.on('time-up', () => {
+      removeMobileTimer();
+      Sound.playTimeUp();
+      gameplaySection.classList.add('hidden');
+      completeSection.classList.remove('hidden');
+      myContributionsVal.textContent = piecesPlacedCount;
+
+      // Show time's up message
+      const msg = document.createElement('div');
+      msg.style.cssText = `
+        text-align:center;
+        color:#ff4500;
+        font-size:1.4rem;
+        font-weight:bold;
+        letter-spacing:2px;
+        margin-bottom:12px;
+      `;
+      msg.textContent = "⏰ TIME'S UP!";
+      completeSection.insertBefore(msg, completeSection.firstChild);
+    });
+
     socket.on('activity-complete', () => {
+      removeMobileTimer();
+      Sound.playComplete(); // 🎉 completion fanfare
       gameplaySection.classList.add('hidden');
       completeSection.classList.remove('hidden');
       myContributionsVal.textContent = piecesPlacedCount;
@@ -159,34 +318,27 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 3. PIECE RENDERER & TOUCH DRAGGING ENGINE
+  // ── 3. Piece Renderer & Touch Drag Engine ───────────────────────────────────
   function renderAssignedPieces() {
     assignedPiecesPool.innerHTML = '';
     pieceSelectorContainer.innerHTML = '';
 
-    // Guard against undefined/null (shouldn't happen but defensive)
     if (!currentAssignedPieces || currentAssignedPieces.length === 0) {
-      assignedPiecesPool.innerHTML = '<div class="minimap-hint" style="color: var(--color-cyan)">Waiting for piece assignment...</div>';
+      assignedPiecesPool.innerHTML = '<div class="minimap-hint" style="color:var(--color-cyan)">Waiting for piece assignment...</div>';
       return;
     }
 
-    // Ensure selectedPieceIndex is in valid range
     selectedPieceIndex = Math.max(0, Math.min(selectedPieceIndex, currentAssignedPieces.length - 1));
 
-    // Show the active piece — centered in the drag board.
-    // Player drags it to its correct grid position.
     const p = currentAssignedPieces[selectedPieceIndex];
-
     const el = document.createElement('div');
     el.className = 'draggable-piece';
     el.id = p.id;
-    // Set dynamic dimensions to exactly match the grid cell size
+
     const percentWidth = 100 / puzzleCols;
     const percentHeight = 100 / puzzleRows;
     el.style.width = `${percentWidth}%`;
     el.style.height = `${percentHeight}%`;
-    
-    // Position at the bottom initially, centered horizontally
     el.style.left = '50%';
     el.style.top = '75%';
     el.innerHTML = `<img src="${p.imageUrl}" alt="Puzzle Piece" draggable="false" />`;
@@ -194,18 +346,15 @@ document.addEventListener('DOMContentLoaded', () => {
     assignedPiecesPool.appendChild(el);
     setupDragging(el, p);
 
-    // Show a hint label indicating the grid target (row, col) for this piece
     const hint = document.createElement('div');
     hint.style.cssText = 'position:absolute;bottom:6px;left:0;right:0;text-align:center;font-size:11px;color:rgba(0,243,255,0.5);font-family:monospace;pointer-events:none;';
     hint.textContent = `Target: row ${p.row + 1}, col ${p.col + 1}`;
     assignedPiecesPool.appendChild(hint);
 
-    // Render selector tabs if there are multiple pieces
     if (currentAssignedPieces.length > 1) {
       currentAssignedPieces.forEach((piece, idx) => {
         const tab = document.createElement('div');
         tab.className = `piece-tab ${idx === selectedPieceIndex ? 'active' : ''}`;
-        
         tab.innerHTML = `
           <div class="piece-tab-thumb">
             <img src="${piece.imageUrl}" alt="Piece Thumbnail" draggable="false" />
@@ -215,14 +364,12 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="tab-target">Row ${piece.row + 1}, Col ${piece.col + 1}</span>
           </div>
         `;
-        
         tab.addEventListener('click', () => {
           if (selectedPieceIndex !== idx) {
             selectedPieceIndex = idx;
             renderAssignedPieces();
           }
         });
-        
         pieceSelectorContainer.appendChild(tab);
       });
     }
@@ -237,20 +384,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let xOffset = 0;
     let yOffset = 0;
 
-    // Attach only pointerdown to the element.
-    // pointermove/pointerup are added to document only while dragging
-    // and removed immediately on release — prevents listener accumulation.
     element.addEventListener('pointerdown', dragStart);
 
     function dragStart(e) {
       e.preventDefault();
       active = true;
       element.classList.add('dragging');
-
       initialX = e.clientX - xOffset;
       initialY = e.clientY - yOffset;
-
-      // Add move/up listeners only for the duration of this drag
       document.addEventListener('pointermove', drag, { passive: false });
       document.addEventListener('pointerup', dragEnd);
     }
@@ -261,28 +402,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
       currentX = e.clientX - initialX;
       currentY = e.clientY - initialY;
-
       xOffset = currentX;
       yOffset = currentY;
 
       element.style.transform = `translate(calc(-50% + ${currentX}px), calc(-50% + ${currentY}px)) scale(1.1)`;
 
-      // Map touch position to the 1200×800 server canvas coordinate space
       const rect = dragBoard.getBoundingClientRect();
       const touchX = e.clientX - rect.left;
       const touchY = e.clientY - rect.top;
 
-      // Snap to the nearest grid cell to remove guesswork
       const cellWidth = rect.width / puzzleCols;
       const cellHeight = rect.height / puzzleRows;
-      
+
       const targetCol = Math.max(0, Math.min(puzzleCols - 1, Math.floor(touchX / cellWidth)));
       const targetRow = Math.max(0, Math.min(puzzleRows - 1, Math.floor(touchY / cellHeight)));
 
       const canvasX = Math.round(targetCol * (CANVAS_WIDTH / puzzleCols));
       const canvasY = Math.round(targetRow * (CANVAS_HEIGHT / puzzleRows));
 
-      // Emit live position so big screen can show the drag in real time
       socket.emit('move-piece', {
         pieceId: pieceInfo.id,
         currentX: canvasX,
@@ -295,7 +432,6 @@ document.addEventListener('DOMContentLoaded', () => {
       active = false;
       element.classList.remove('dragging');
 
-      // Always remove the document-level listeners immediately
       document.removeEventListener('pointermove', drag);
       document.removeEventListener('pointerup', dragEnd);
 
@@ -312,21 +448,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const canvasX = Math.round(targetCol * (CANVAS_WIDTH / puzzleCols));
       const canvasY = Math.round(targetRow * (CANVAS_HEIGHT / puzzleRows));
 
-      // Final placement submission
       socket.emit('place-piece', {
         pieceId: pieceInfo.id,
         currentX: canvasX,
         currentY: canvasY
       });
 
-      // Reset visual position — server will confirm or deny placement
       xOffset = 0;
       yOffset = 0;
       element.style.transform = `translate(-50%, -50%)`;
     }
   }
 
-  // Helper colors
+  // ── Helpers ─────────────────────────────────────────────────────────────────
   function getNeonColorName(hex) {
     const colors = {
       '#ff007f': 'NEON PINK',
@@ -341,16 +475,9 @@ document.addEventListener('DOMContentLoaded', () => {
     return colors[hex] || 'NEON PILOT';
   }
 
-  // 4. HAPTICS (Device Vibration)
   function triggerHapticFeedback(success) {
     if ('vibrate' in navigator) {
-      if (success) {
-        // Success haptic: short double tap
-        navigator.vibrate([40, 40, 60]);
-      } else {
-        // Failure haptic: long single rumble
-        navigator.vibrate(200);
-      }
+      navigator.vibrate(success ? [40, 40, 60] : 200);
     }
   }
 });
